@@ -9,9 +9,15 @@ import android.util.Log
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
+            val prefs = context.getSharedPreferences("media_proxy", Context.MODE_PRIVATE)
+
+            if (!prefs.getBoolean("auto_start", true)) {
+                Log.i("MediaProxy", "Boot completed, auto-start disabled — skipping")
+                return
+            }
+
             Log.i("MediaProxy", "Boot completed, starting proxy service")
 
-            val prefs = context.getSharedPreferences("media_proxy", Context.MODE_PRIVATE)
             val data = prefs.getString("sources", null)
             if (data.isNullOrBlank()) return
 

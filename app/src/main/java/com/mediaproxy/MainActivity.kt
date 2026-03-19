@@ -167,6 +167,54 @@ class MainActivity : AppCompatActivity() {
         addButton.setOnClickListener { showAddSourceDialog() }
         content.addView(addButton)
 
+        // Settings section
+        content.addView(View(this).apply {
+            setBackgroundColor(0xFF333333.toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
+            ).apply { topMargin = dp(24); bottomMargin = dp(16) }
+        })
+
+        content.addView(TextView(this).apply {
+            text = "Settings"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 0, 0, dp(8))
+        })
+
+        val autoStartRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setBackgroundColor(0xFF1E1E1E.toInt())
+        }
+
+        autoStartRow.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            addView(TextView(context).apply {
+                text = "Start on boot"
+                textSize = 16f
+                setTextColor(Color.WHITE)
+            })
+            addView(TextView(context).apply {
+                text = "Automatically start the proxy when the device boots"
+                textSize = 12f
+                setTextColor(0xFF888888.toInt())
+            })
+        })
+
+        val autoStartToggle = Switch(this).apply {
+            isChecked = getAutoStartEnabled()
+            isFocusable = true
+            setOnCheckedChangeListener { _, checked ->
+                setAutoStartEnabled(checked)
+            }
+        }
+        autoStartRow.addView(autoStartToggle)
+        content.addView(autoStartRow)
+
         // Nova instructions
         content.addView(View(this).apply {
             setBackgroundColor(0xFF333333.toInt())
@@ -176,11 +224,41 @@ class MainActivity : AppCompatActivity() {
         })
 
         content.addView(TextView(this).apply {
-            text = "Nova Video Player Setup:\nProtocol: WebDAV  |  Server: 127.0.0.1\nPort: 8088  |  Path: /\nNo username/password"
+            text = "Player Setup:\nProtocol: WebDAV  |  Server: 127.0.0.1\nPort: 8088  |  Path: /\nNo username/password"
             textSize = 13f
             setTextColor(0xFF888888.toInt())
             gravity = Gravity.CENTER
             setLineSpacing(dp(2).toFloat(), 1f)
+        })
+
+        // About section
+        content.addView(View(this).apply {
+            setBackgroundColor(0xFF333333.toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
+            ).apply { topMargin = dp(24); bottomMargin = dp(16) }
+        })
+
+        content.addView(TextView(this).apply {
+            text = "About"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 0, 0, dp(8))
+        })
+
+        content.addView(TextView(this).apply {
+            text = "Media Proxy v1.0.0\n\n" +
+                "Bridges HTTP browsable media indexes to WebDAV, " +
+                "enabling media players like Nova Video Player to browse " +
+                "and stream content from HTTP directory listings.\n\n" +
+                "Built for personal use. Anyone with a similar setup is welcome to use it.\n\n" +
+                "GitHub: github.com/KhaledBinAmir/media_proxy\n" +
+                "Telegram: t.me/KhaledBinAmir"
+            textSize = 13f
+            setTextColor(0xFF888888.toInt())
+            setLineSpacing(dp(2).toFloat(), 1f)
+            setPadding(dp(12), 0, dp(12), dp(16))
         })
 
         scroll.addView(content)
@@ -375,6 +453,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ── Persistence ──
+
+    private fun getAutoStartEnabled(): Boolean {
+        return getSharedPreferences("media_proxy", Context.MODE_PRIVATE)
+            .getBoolean("auto_start", true)
+    }
+
+    private fun setAutoStartEnabled(enabled: Boolean) {
+        getSharedPreferences("media_proxy", Context.MODE_PRIVATE)
+            .edit().putBoolean("auto_start", enabled).apply()
+    }
 
     private fun saveSources() {
         val prefs = getSharedPreferences("media_proxy", Context.MODE_PRIVATE)
