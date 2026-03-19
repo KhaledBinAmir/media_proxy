@@ -48,6 +48,7 @@ class ProxyService : Service() {
             server?.stop()
             server = WebDAVServer(port, sources)
             server?.start()
+            server?.prefetchSources()
             isRunning = true
             Log.i(TAG, "WebDAV proxy started on port $port with ${sources.size} source(s)")
         } catch (e: Exception) {

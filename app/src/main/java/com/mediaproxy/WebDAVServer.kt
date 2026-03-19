@@ -21,6 +21,7 @@ class WebDAVServer(
 
     companion object {
         const val TAG = "MediaProxy"
+        const val CACHE_TTL_MS = 5 * 60 * 1000L  // 5 minutes
     }
 
     data class Source(val name: String, val url: String)
@@ -31,6 +32,17 @@ class WebDAVServer(
         val dateStr: String,
         val sizeStr: String
     )
+
+    // ── Directory cache ──
+
+    private data class CachedIndex(
+        val entries: List<IndexEntry>,
+        val timestamp: Long
+    )
+
+    private val indexCache = ConcurrentHashMap<String, CachedIndex>()
+    private val fileSizeCache = ConcurrentHashMap<String, Map<String, String>>()
+    private val prefetchExecutor = Executors.newSingleThreadExecutor()
 
     // ── URL encoding ──
 
@@ -75,6 +87,15 @@ class WebDAVServer(
     )
 
     private fun fetchIndex(decodedPath: String): List<IndexEntry>? {
+        val cacheKey = decodedPath.trim('/')
+
+        // Check cache first
+        val cached = indexCache[cacheKey]
+        if (cached != null && System.currentTimeMillis() - cached.timestamp < CACHE_TTL_MS) {
+            Log.d(TAG, "fetchIndex CACHE HIT: $cacheKey (${cached.entries.size} entries)")
+            return cached.entries
+        }
+
         var url = buildUpstreamUrl(decodedPath) ?: return null
         if (!url.endsWith("/")) url += "/"
 
@@ -109,10 +130,41 @@ class WebDAVServer(
                 val sizeStr = matcher.group(4) ?: "-"
                 entries.add(IndexEntry(displayName, isDir, dateStr, sizeStr))
             }
+
+            // Cache the result
+            indexCache[cacheKey] = CachedIndex(entries, System.currentTimeMillis())
+            Log.d(TAG, "fetchIndex CACHED: $cacheKey (${entries.size} entries)")
+
             entries
         } catch (e: Exception) {
             Log.e(TAG, "fetchIndex error: ${e.message}")
+            // Return stale cache if available (better than nothing)
+            cached?.let {
+                Log.d(TAG, "fetchIndex returning STALE cache for: $cacheKey")
+                return it.entries
+            }
             null
+        }
+    }
+
+    /**
+     * Pre-fetch source root directories in background when server starts.
+     * This warms the cache so Nova's first request is instant.
+     */
+    fun prefetchSources() {
+        prefetchExecutor.submit {
+            Log.i(TAG, "Pre-fetching ${sources.size} source(s)...")
+            for (source in sources) {
+                try {
+                    val entries = fetchIndex("${source.name}/")
+                    if (entries != null) {
+                        Log.i(TAG, "Pre-fetched ${source.name}: ${entries.size} entries")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Pre-fetch failed for ${source.name}: ${e.message}")
+                }
+            }
+            Log.i(TAG, "Pre-fetch complete")
         }
     }
 
@@ -203,6 +255,15 @@ class WebDAVServer(
      */
     private fun fetchFileSizes(dirDecodedPath: String, files: List<IndexEntry>): Map<String, String> {
         if (files.isEmpty()) return emptyMap()
+        val cacheKey = dirDecodedPath.trim('/')
+
+        // Check cache
+        val cached = fileSizeCache[cacheKey]
+        if (cached != null) {
+            Log.d(TAG, "fileSizes CACHE HIT: $cacheKey")
+            return cached
+        }
+
         val result = ConcurrentHashMap<String, String>()
         val executor = Executors.newFixedThreadPool(minOf(files.size, 8))
         val dirPath = dirDecodedPath.trimEnd('/') + "/"
@@ -231,7 +292,10 @@ class WebDAVServer(
         }
 
         executor.shutdown()
-        executor.awaitTermination(15, TimeUnit.SECONDS)
+        executor.awaitTermination(60, TimeUnit.SECONDS)
+
+        // Cache file sizes (these rarely change)
+        fileSizeCache[cacheKey] = result
         return result
     }
 
