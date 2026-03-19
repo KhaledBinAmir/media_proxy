@@ -34,6 +34,7 @@ class WebDAVServer(
     // ── Cache (lives until proxy restarts) ──
 
     private val indexCache = ConcurrentHashMap<String, List<IndexEntry>>()
+    private val xmlCache = ConcurrentHashMap<String, String>()  // caches built PROPFIND XML responses
     private val prefetchExecutor = Executors.newSingleThreadExecutor()
 
     // ── URL encoding ──
@@ -142,9 +143,29 @@ class WebDAVServer(
             Log.i(TAG, "Pre-fetching ${sources.size} source(s)...")
             for (source in sources) {
                 try {
-                    val entries = fetchIndex("${source.name}/")
+                    val dirPath = "${source.name}/"
+                    val entries = fetchIndex(dirPath)
                     if (entries != null) {
                         Log.i(TAG, "Pre-fetched ${source.name}: ${entries.size} entries")
+
+                        // Also pre-build the XML response so first PROPFIND is instant
+                        val body = StringBuilder()
+                        val hrefPath = "/${source.name}/"
+                        body.append(xmlPropCollection(hrefPath, source.name))
+                        for (entry in entries) {
+                            val childName = entry.displayName.trimEnd('/')
+                            val childHref = hrefPath + childName + (if (entry.isDir) "/" else "")
+                            val lastMod = formatDate(entry.dateStr)
+                            if (entry.isDir) {
+                                body.append(xmlPropCollection(childHref, childName, lastMod))
+                            } else {
+                                val size = parseNginxSize(entry.sizeStr)
+                                body.append(xmlPropFile(childHref, childName, size, guessMime(childName), lastMod))
+                            }
+                        }
+                        val xml = wrapMultistatus(body.toString())
+                        xmlCache["$dirPath|1"] = xml
+                        Log.i(TAG, "Pre-built XML for ${source.name}: ${xml.length / 1024}KB")
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Pre-fetch failed for ${source.name}: ${e.message}")
@@ -413,27 +434,46 @@ class WebDAVServer(
         val entries = fetchIndex(dirPath)
 
         if (entries != null) {
-            val body = StringBuilder()
+            val xmlCacheKey = "$dirPath|$depth"
+
+            // Check XML cache — avoids rebuilding massive XML on repeat requests
+            xmlCache[xmlCacheKey]?.let {
+                Log.d(TAG, "XML CACHE HIT: $xmlCacheKey")
+                return resp207(it)
+            }
+
+            val body = StringBuilder(entries.size * 300)  // pre-allocate
             val hrefPath = "/" + dirPath.trim('/') + "/"
             val dirName = dirPath.trimEnd('/').substringAfterLast('/').ifEmpty { sourceName }
             body.append(xmlPropCollection(hrefPath, dirName))
+
+            val isLargeDir = entries.size > 500
 
             if (depth != "0") {
                 for (entry in entries) {
                     val childName = entry.displayName.trimEnd('/')
                     val childHref = hrefPath + childName + (if (entry.isDir) "/" else "")
-                    val lastMod = formatDate(entry.dateStr)
+                    // Skip date parsing for huge directories — saves CPU
+                    val lastMod = if (isLargeDir) "" else formatDate(entry.dateStr)
 
                     if (entry.isDir) {
-                        body.append(xmlPropCollection(childHref, childName, lastMod))
+                        // Minimal XML for large dirs — just href + displayname + collection
+                        if (isLargeDir) {
+                            body.append("<D:response><D:href>${esc(encodePathSegments(childHref))}</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype><D:displayname>${esc(childName)}</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
+                        } else {
+                            body.append(xmlPropCollection(childHref, childName, lastMod))
+                        }
                     } else {
-                        // Parse nginx's human-readable size (e.g. "5G" → bytes)
                         val size = parseNginxSize(entry.sizeStr)
                         body.append(xmlPropFile(childHref, childName, size, guessMime(childName), lastMod))
                     }
                 }
             }
-            return resp207(wrapMultistatus(body.toString()))
+
+            val xml = wrapMultistatus(body.toString())
+            xmlCache[xmlCacheKey] = xml
+            Log.d(TAG, "XML CACHED: $xmlCacheKey (${xml.length / 1024}KB)")
+            return resp207(xml)
         }
 
         // Last resort: try HEAD as file (for paths without known extensions)
