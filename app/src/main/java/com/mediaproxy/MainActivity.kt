@@ -475,7 +475,7 @@ class MainActivity : AppCompatActivity() {
         val data = prefs.getString("sources", null)
         sources.clear()
         if (data.isNullOrBlank()) {
-            sources.add(Pair("TV Series", "http://172.16.172.166:8087"))
+            // No default sources — let users add their own
         } else {
             for (line in data.split("\n")) {
                 val parts = line.split("\t", limit = 2)
