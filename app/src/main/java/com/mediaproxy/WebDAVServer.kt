@@ -82,8 +82,8 @@ class WebDAVServer(
 
         return try {
             val conn = URL(url).openConnection() as HttpURLConnection
-            conn.connectTimeout = 15000
-            conn.readTimeout = 15000
+            conn.connectTimeout = 30000
+            conn.readTimeout = 180000
             conn.instanceFollowRedirects = true
             val code = conn.responseCode
             if (code != 200) {
@@ -173,8 +173,8 @@ class WebDAVServer(
         return try {
             val conn = URL(url).openConnection() as HttpURLConnection
             conn.requestMethod = "HEAD"
-            conn.connectTimeout = 10000
-            conn.readTimeout = 10000
+            conn.connectTimeout = 30000
+            conn.readTimeout = 180000
             conn.instanceFollowRedirects = true
             conn.connect()
 
@@ -214,8 +214,8 @@ class WebDAVServer(
                     val url = buildUpstreamUrl(filePath) ?: return@submit
                     val conn = URL(url).openConnection() as HttpURLConnection
                     conn.requestMethod = "HEAD"
-                    conn.connectTimeout = 8000
-                    conn.readTimeout = 8000
+                    conn.connectTimeout = 30000
+                    conn.readTimeout = 60000
                     conn.instanceFollowRedirects = true
                     conn.connect()
                     if (conn.responseCode < 400) {
