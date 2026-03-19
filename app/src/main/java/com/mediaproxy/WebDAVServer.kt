@@ -123,9 +123,13 @@ class WebDAVServer(
                 entries.add(IndexEntry(displayName, isDir, dateStr, sizeStr))
             }
 
-            // Cache permanently (until proxy restarts)
-            indexCache[cacheKey] = entries
-            Log.d(TAG, "fetchIndex CACHED: $cacheKey (${entries.size} entries)")
+            // Only cache non-empty results (empty might be a glitch)
+            if (entries.isNotEmpty()) {
+                indexCache[cacheKey] = entries
+                Log.d(TAG, "fetchIndex CACHED: $cacheKey (${entries.size} entries)")
+            } else {
+                Log.d(TAG, "fetchIndex EMPTY (not cached): $cacheKey")
+            }
 
             entries
         } catch (e: Exception) {
@@ -471,8 +475,11 @@ class WebDAVServer(
             }
 
             val xml = wrapMultistatus(body.toString())
-            xmlCache[xmlCacheKey] = xml
-            Log.d(TAG, "XML CACHED: $xmlCacheKey (${xml.length / 1024}KB)")
+            // Only cache XML for non-trivial responses
+            if (entries.isNotEmpty()) {
+                xmlCache[xmlCacheKey] = xml
+                Log.d(TAG, "XML CACHED: $xmlCacheKey (${xml.length / 1024}KB)")
+            }
             return resp207(xml)
         }
 
