@@ -11,7 +11,6 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
 class WebDAVServer(
@@ -21,7 +20,6 @@ class WebDAVServer(
 
     companion object {
         const val TAG = "MediaProxy"
-        const val CACHE_TTL_MS = 5 * 60 * 1000L  // 5 minutes
     }
 
     data class Source(val name: String, val url: String)
@@ -33,15 +31,9 @@ class WebDAVServer(
         val sizeStr: String
     )
 
-    // ── Directory cache ──
+    // ── Cache (lives until proxy restarts) ──
 
-    private data class CachedIndex(
-        val entries: List<IndexEntry>,
-        val timestamp: Long
-    )
-
-    private val indexCache = ConcurrentHashMap<String, CachedIndex>()
-    private val fileSizeCache = ConcurrentHashMap<String, Map<String, String>>()
+    private val indexCache = ConcurrentHashMap<String, List<IndexEntry>>()
     private val prefetchExecutor = Executors.newSingleThreadExecutor()
 
     // ── URL encoding ──
@@ -89,11 +81,10 @@ class WebDAVServer(
     private fun fetchIndex(decodedPath: String): List<IndexEntry>? {
         val cacheKey = decodedPath.trim('/')
 
-        // Check cache first
-        val cached = indexCache[cacheKey]
-        if (cached != null && System.currentTimeMillis() - cached.timestamp < CACHE_TTL_MS) {
-            Log.d(TAG, "fetchIndex CACHE HIT: $cacheKey (${cached.entries.size} entries)")
-            return cached.entries
+        // Check cache (permanent until restart)
+        indexCache[cacheKey]?.let {
+            Log.d(TAG, "fetchIndex CACHE HIT: $cacheKey (${it.size} entries)")
+            return it
         }
 
         var url = buildUpstreamUrl(decodedPath) ?: return null
@@ -131,18 +122,13 @@ class WebDAVServer(
                 entries.add(IndexEntry(displayName, isDir, dateStr, sizeStr))
             }
 
-            // Cache the result
-            indexCache[cacheKey] = CachedIndex(entries, System.currentTimeMillis())
+            // Cache permanently (until proxy restarts)
+            indexCache[cacheKey] = entries
             Log.d(TAG, "fetchIndex CACHED: $cacheKey (${entries.size} entries)")
 
             entries
         } catch (e: Exception) {
             Log.e(TAG, "fetchIndex error: ${e.message}")
-            // Return stale cache if available (better than nothing)
-            cached?.let {
-                Log.d(TAG, "fetchIndex returning STALE cache for: $cacheKey")
-                return it.entries
-            }
             null
         }
     }
@@ -166,6 +152,32 @@ class WebDAVServer(
             }
             Log.i(TAG, "Pre-fetch complete")
         }
+    }
+
+    // ── Nginx size parser ──
+
+    /**
+     * Convert nginx human-readable size to bytes.
+     * nginx outputs: "5G", "250M", "1.2G", "500K", "12345" (raw bytes), or "-" (directory)
+     */
+    private fun parseNginxSize(sizeStr: String): String {
+        if (sizeStr == "-") return ""
+        val s = sizeStr.trim()
+        if (s.isEmpty()) return ""
+
+        // Pure number = already bytes
+        s.toLongOrNull()?.let { return it.toString() }
+
+        // Has suffix: K, M, G
+        val numPart = s.dropLast(1).toDoubleOrNull() ?: return ""
+        val bytes = when (s.last().uppercaseChar()) {
+            'K' -> (numPart * 1024).toLong()
+            'M' -> (numPart * 1024 * 1024).toLong()
+            'G' -> (numPart * 1024 * 1024 * 1024).toLong()
+            'T' -> (numPart * 1024 * 1024 * 1024 * 1024).toLong()
+            else -> return ""
+        }
+        return bytes.toString()
     }
 
     // ── MIME types ──
@@ -247,56 +259,6 @@ class WebDAVServer(
             Log.e(TAG, "headUpstream error for $url: ${e.message}")
             null
         }
-    }
-
-    /**
-     * Fetch real Content-Length for multiple files in parallel via HEAD requests.
-     * Returns a map of displayName -> Content-Length string.
-     */
-    private fun fetchFileSizes(dirDecodedPath: String, files: List<IndexEntry>): Map<String, String> {
-        if (files.isEmpty()) return emptyMap()
-        val cacheKey = dirDecodedPath.trim('/')
-
-        // Check cache
-        val cached = fileSizeCache[cacheKey]
-        if (cached != null) {
-            Log.d(TAG, "fileSizes CACHE HIT: $cacheKey")
-            return cached
-        }
-
-        val result = ConcurrentHashMap<String, String>()
-        val executor = Executors.newFixedThreadPool(minOf(files.size, 8))
-        val dirPath = dirDecodedPath.trimEnd('/') + "/"
-
-        for (entry in files) {
-            executor.submit {
-                try {
-                    val filePath = dirPath + entry.displayName.trimEnd('/')
-                    val url = buildUpstreamUrl(filePath) ?: return@submit
-                    val conn = URL(url).openConnection() as HttpURLConnection
-                    conn.requestMethod = "HEAD"
-                    conn.connectTimeout = 30000
-                    conn.readTimeout = 60000
-                    conn.instanceFollowRedirects = true
-                    conn.connect()
-                    if (conn.responseCode < 400) {
-                        conn.getHeaderField("Content-Length")?.let {
-                            result[entry.displayName.trimEnd('/')] = it
-                        }
-                    }
-                    conn.disconnect()
-                } catch (e: Exception) {
-                    Log.w(TAG, "HEAD size error for ${entry.displayName}: ${e.message}")
-                }
-            }
-        }
-
-        executor.shutdown()
-        executor.awaitTermination(60, TimeUnit.SECONDS)
-
-        // Cache file sizes (these rarely change)
-        fileSizeCache[cacheKey] = result
-        return result
     }
 
     // ── PROPFIND XML builders ──
@@ -457,17 +419,6 @@ class WebDAVServer(
             body.append(xmlPropCollection(hrefPath, dirName))
 
             if (depth != "0") {
-                // Get real file sizes via parallel HEAD requests
-                // Only fetch sizes for reasonable-sized directories (not root with 1000+ shows)
-                val fileEntries = entries.filter { !it.isDir }
-                val fileSizes = if (fileEntries.isNotEmpty() && fileEntries.size <= 100) {
-                    Log.d(TAG, "Fetching real sizes for ${fileEntries.size} files...")
-                    fetchFileSizes(dirPath, fileEntries)
-                } else {
-                    if (fileEntries.size > 100) Log.d(TAG, "Skipping size fetch for ${fileEntries.size} files (too many)")
-                    emptyMap()
-                }
-
                 for (entry in entries) {
                     val childName = entry.displayName.trimEnd('/')
                     val childHref = hrefPath + childName + (if (entry.isDir) "/" else "")
@@ -476,8 +427,9 @@ class WebDAVServer(
                     if (entry.isDir) {
                         body.append(xmlPropCollection(childHref, childName, lastMod))
                     } else {
-                        val realSize = fileSizes[childName] ?: ""
-                        body.append(xmlPropFile(childHref, childName, realSize, guessMime(childName), lastMod))
+                        // Parse nginx's human-readable size (e.g. "5G" → bytes)
+                        val size = parseNginxSize(entry.sizeStr)
+                        body.append(xmlPropFile(childHref, childName, size, guessMime(childName), lastMod))
                     }
                 }
             }
